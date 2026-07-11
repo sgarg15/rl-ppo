@@ -1,9 +1,11 @@
-from collections import deque
-
 import gymnasium as gym
 import torch
 import torch.nn as nn
 from torch.distributions import Categorical
+import numpy as np
+from collections import deque
+
+from ac import ActorCriticAgent
 
 ENV_NAME = "CartPole-v1"
 SEED = 42
@@ -17,38 +19,10 @@ ENTROPY_COEF = 0.001 # Coefficient for the entropy loss
 MAX_EPISODES = 1000 # Maximum number of episodes to train
 HIDDEN_DIM = 128 # Number of hidden units in the neural network
 
-class ActorCritic(nn.Module):
-    """
-    Actor-Critic neural network architecture for reinforcement learning.
+ROLLOUT_STEPS = 256 # Number of steps to rollout before updating the model
 
-    The reason for using a shared architecture is to allow the actor and critic networks to share some common features, which can lead to better generalization and more efficient learning. 
-    The shared layers extract features from the input observations, which are then used by both the actor and critic networks to make decisions and evaluate states, respectively.
-    """
-    def __init__(self, observation_dim: int, action_dim: int, hidden_dim: int) -> None:
-        super().__init__()
-    
-        # Shared layers between the actor and critic networks
-        self.shared_layers = nn.Sequential(
-            nn.Linear(observation_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh()
-        )
+MAX_GRAD_NORM = 0.5 # Maximum gradient norm for gradient clipping
 
-        # Actor network: outputs the action probabilities
-        self.actor = nn.Linear(hidden_dim, action_dim)
-
-        # Critic network: outputs the state value
-        self.critic = nn.Linear(hidden_dim, 1)
-
-    def forward(self, observation: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        features = self.shared_layers(observation)
-
-        action_logits = self.actor(features)
-        state_value = self.critic(features).squeeze(-1)  # Remove the last dimension for state value
-
-        return action_logits, state_value
-    
 
 def train() -> None:
     torch.manual_seed(SEED)
@@ -59,97 +33,106 @@ def train() -> None:
     observation_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
 
-    model = ActorCritic(observation_dim, action_dim, HIDDEN_DIM)
+    model = ActorCriticAgent(observation_dim, action_dim, HIDDEN_DIM)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    recent_rewards = deque(maxlen=100)
+    state, _ = env.reset(seed=SEED)
+    current_episode_reward = 0.0
+    reward_history = deque(maxlen=100)
+    episode_completed = 0
 
-    for episode in range(MAX_EPISODES):
-        state, _ = env.reset(seed=SEED if episode == 1 else None)
+    for update in range(MAX_EPISODES):
+        rollout_states = []
+        rollout_actions = []
+        rollout_rewards = []
+        rollout_next_states = []
+        rollout_terminated = []
 
-        episode_reward = 0
-        done = False
-
-        while not done:
+        for step in range(ROLLOUT_STEPS):
             state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
 
-            action_logits, state_value = model(state_tensor)
+            with torch.no_grad():
+                action_logits, state_value = model(state_tensor)
 
-            # Create a categorical distribution over the action logits
-            distribution = Categorical(logits=action_logits)
+                # Create a categorical distribution over the action logits
+                distribution = Categorical(logits=action_logits)
 
-            # Sample an action from the distribution and compute its log probability and compute the entropy of the distribution
-            action = distribution.sample()
-            log_prob = distribution.log_prob(action)
-            entropy = distribution.entropy()
+                # Sample an action from the distribution and compute its log probability and compute the entropy of the distribution
+                action = distribution.sample()
 
             next_state, reward, terminated, truncated, _ = env.step(action.item())
 
+            current_episode_reward += reward
+
             done = terminated or truncated
-            episode_reward += reward
 
-            next_state_tensor = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
+            rollout_states.append(state)
+            rollout_actions.append(action.item())
+            rollout_rewards.append(reward)
+            rollout_next_states.append(next_state)
+            rollout_terminated.append(terminated)
 
-            with torch.no_grad():
-                # Compute the value of the next state using the critic network
-                _, next_state_value = model(next_state_tensor)
+            if done:
+                reward_history.append(current_episode_reward)
+                episode_completed += 1
 
-                # If the episode is terminated, the next state value is zero
-                if terminated:
-                    next_state_value = torch.zeros_like(next_state_value)
-                
-                # Compute the TD target for the critic network using the Bellman equation which is the reward plus the discounted value of the next state
-                td_target = (
-                    torch.tensor([reward], dtype=torch.float32) 
-                    + GAMMA * next_state_value
-                )
-
-            # Compute the advantage for the actor network
-            # A_t = R_t + gamma * V(s_{t+1}) - V(s_t)
-            advantage = td_target - state_value  
-
-            # Actor performs gradient ascent on:
-            # log pi(a_t | s_t) * A_t
-            # PyTorch minimizes losses, so we negate it.
-            # We detach the advantage to prevent gradients from flowing into the critic network during the actor update.
-            # And mean over the batch (in this case, a single sample) to get a scalar loss value.
-            actor_loss = -(log_prob * advantage.detach()).mean()
-
-            critic_loss = advantage.pow(2).mean()  # Mean squared error loss for the critic
-
-            entropy_bonus = entropy.mean()
-
-            total_loss = (
-                actor_loss
-                + VALUE_COEF * critic_loss
-                - ENTROPY_COEF * entropy_bonus
-            )
-
-            optimizer.zero_grad()
-            # Compute gradients for the total loss 
-            total_loss.backward()
-
-            nn.utils.clip_grad_norm_(model.parameters(), 0.5)  # Gradient clipping to prevent exploding gradients
-
-            optimizer.step()
-
-            state = next_state
-
-        recent_rewards.append(episode_reward)
-        average_reward = sum(recent_rewards) / len(recent_rewards)
-
-        if episode % 10 == 0:
-            print(
-                        f"Episode: {episode:4d} | "
-                        f"Reward: {episode_reward:6.1f} | "
-                        f"Average(100): {average_reward:6.1f}"
-                    )
+                current_episode_reward = 0.0
+                state, _ = env.reset()
+            else:
+                state = next_state
         
-        if len(recent_rewards) == 100 and average_reward >= 475.0:
-            print(f"Solved in {episode} episodes!")
-            print(f"Average reward over the last 100 episodes: {average_reward:.2f}")
-            break
+        states = torch.as_tensor(rollout_states, dtype=torch.float32)
+        actions = torch.as_tensor(rollout_actions, dtype=torch.int64)
+        rewards = torch.as_tensor(rollout_rewards, dtype=torch.float32)
+        next_states = torch.as_tensor(rollout_next_states, dtype=torch.float32)
+        terminated_flags = torch.as_tensor(rollout_terminated, dtype=torch.float32)
+
+        with torch.no_grad():
+            _, old_values = model(states)
+            _, next_values = model(next_states)
+
+            old_values = old_values.squeeze(-1)
+            next_values = next_values.squeeze(-1)
+
+            td_targets = rewards + GAMMA * next_values * (1 - terminated_flags)
+            advantages = td_targets - old_values
+
+        normalized_advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
+
+        logits, predicted_values = model(states)
+
+        distribution = Categorical(logits=logits)
+        log_probs = distribution.log_prob(actions)
+
+        actor_loss = -(log_probs * normalized_advantages).mean()
+
+        critic_loss = 0.5 * (td_targets - predicted_values.squeeze(-1)).pow(2).mean()
+
+        total_loss = (
+            actor_loss
+            + VALUE_COEF * critic_loss
+            - ENTROPY_COEF * distribution.entropy().mean()
+        )
+
+        optimizer.zero_grad()
+        total_loss.backward()
+
+        nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+
+        optimizer.step()
+
+        average_reward = (
+            sum(reward_history) / len(reward_history) if reward_history else 0.0
+        )
+
+        print(
+            f"Update {update:4d} | "
+            f"Episodes {episode_completed:4d} | "
+            f"Average reward {average_reward:7.2f} | "
+            f"Actor loss {actor_loss.item():8.4f} | "
+            f"Critic loss {critic_loss.item():8.4f}"
+        )
 
     env.close()
 
