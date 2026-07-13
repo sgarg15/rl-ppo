@@ -27,6 +27,8 @@ GAE_LAMBDA = 0.95 # Lambda parameter for Generalized Advantage Estimation (GAE)
 
 CLIP_EPSILON = 0.2 # Clipping parameter for PPO
 
+PPO_EPOCHS = 4 # Number of epochs to update the model per rollout
+
 def train() -> None:
     torch.manual_seed(SEED)
 
@@ -139,43 +141,58 @@ def train() -> None:
 
         normalized_advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
 
-        logits, predicted_values = model(states)
+        # logits, predicted_values = model(states)
 
-        distribution = Categorical(logits=logits)
-        log_probs = distribution.log_prob(actions)
+        # distribution = Categorical(logits=logits)
+        # log_probs = distribution.log_prob(actions)
 
-        # actor_loss = -(log_probs * normalized_advantages).mean()
+        # # actor_loss = -(log_probs * normalized_advantages).mean()
+        for epoch in range(PPO_EPOCHS):
+            logits, predicted_values = model(states)
+            distribution = Categorical(logits=logits)
 
-        new_log_probs = distribution.log_prob(actions)
-        log_ratio = new_log_probs - old_log_probs
-        ratio = torch.exp(log_ratio)
+            new_log_probs = distribution.log_prob(actions)
+            log_ratio = new_log_probs - old_log_probs
+            ratio = torch.exp(log_ratio)
 
-        unclipped_objective = ratio * normalized_advantages
+            unclipped_objective = ratio * normalized_advantages
 
-        clipped_ratio = torch.clamp(
-            ratio, 
-            1.0 - CLIP_EPSILON, 
-            1.0 + CLIP_EPSILON
-        )
+            clipped_ratio = torch.clamp(
+                ratio, 
+                1.0 - CLIP_EPSILON, 
+                1.0 + CLIP_EPSILON
+            )
 
-        clipped_objective = clipped_ratio * normalized_advantages
+            clipped_objective = clipped_ratio * normalized_advantages
 
-        actor_loss_clipped = -torch.min(unclipped_objective, clipped_objective).mean()
+            actor_loss_clipped = -torch.min(unclipped_objective, clipped_objective).mean()
 
-        critic_loss = 0.5 * (returns - predicted_values.squeeze(-1)).pow(2).mean()
+            critic_loss = 0.5 * (returns - predicted_values.squeeze(-1)).pow(2).mean()
 
-        total_loss = (
-            actor_loss_clipped
-            + VALUE_COEF * critic_loss
-            - ENTROPY_COEF * distribution.entropy().mean()
-        )
+            total_loss = (
+                actor_loss_clipped
+                + VALUE_COEF * critic_loss
+                - ENTROPY_COEF * distribution.entropy().mean()
+            )
 
-        optimizer.zero_grad()
-        total_loss.backward()
+            optimizer.zero_grad()
+            total_loss.backward()
 
-        nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+            nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
 
-        optimizer.step()
+            optimizer.step()
+
+            clip_fraction = (
+                (ratio - 1.0).abs() > CLIP_EPSILON
+            ).float().mean()
+
+            print(
+                f"Epoch {epoch + 1} | "
+                f"Ratio mean {ratio.mean().item():.4f} | "
+                f"Ratio min {ratio.min().item():.4f} | "
+                f"Ratio max {ratio.max().item():.4f} | "
+                f"Clip fraction {clip_fraction.item():.4f}"
+            )
 
         average_reward = (
             sum(reward_history) / len(reward_history) if reward_history else 0.0
@@ -187,15 +204,6 @@ def train() -> None:
             f"Average reward {average_reward:7.2f} | "
             f"Actor loss {actor_loss_clipped.item():8.4f} | "
             f"Critic loss {critic_loss.item():8.4f}"
-        )
-
-        print(
-            "Ratio mean:",
-            ratio.mean().item(),
-            "Ratio min:",
-            ratio.min().item(),
-            "Ratio max:",
-            ratio.max().item(),
         )
 
     env.close()
