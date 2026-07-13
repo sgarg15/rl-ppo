@@ -23,6 +23,8 @@ ROLLOUT_STEPS = 256 # Number of steps to rollout before updating the model
 
 MAX_GRAD_NORM = 0.5 # Maximum gradient norm for gradient clipping
 
+GAE_LAMBDA = 0.95 # Lambda parameter for Generalized Advantage Estimation (GAE)
+
 
 def train() -> None:
     torch.manual_seed(SEED)
@@ -48,6 +50,7 @@ def train() -> None:
         rollout_rewards = []
         rollout_next_states = []
         rollout_terminated = []
+        rollout_episode_ended = []
 
         for step in range(ROLLOUT_STEPS):
             state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
@@ -72,6 +75,7 @@ def train() -> None:
             rollout_rewards.append(reward)
             rollout_next_states.append(next_state)
             rollout_terminated.append(terminated)
+            rollout_episode_ended.append(done)
 
             if done:
                 reward_history.append(current_episode_reward)
@@ -87,6 +91,7 @@ def train() -> None:
         rewards = torch.as_tensor(rollout_rewards, dtype=torch.float32)
         next_states = torch.as_tensor(rollout_next_states, dtype=torch.float32)
         terminated_flags = torch.as_tensor(rollout_terminated, dtype=torch.float32)
+        episode_ended_flags = torch.as_tensor(rollout_episode_ended, dtype=torch.float32)
 
         with torch.no_grad():
             _, old_values = model(states)
@@ -95,8 +100,35 @@ def train() -> None:
             old_values = old_values.squeeze(-1)
             next_values = next_values.squeeze(-1)
 
-            td_targets = rewards + GAMMA * next_values * (1 - terminated_flags)
-            advantages = td_targets - old_values
+            advantages = torch.zeros_like(rewards)
+            gae = torch.tensor(0.0)
+
+            # Compute the Generalized Advantage Estimation (GAE) in reverse order 
+            # Because we need to compute the advantage for each time step based on the future rewards and values
+            for t in reversed(range(ROLLOUT_STEPS)):
+                bootstrap_value = 1.0 - terminated_flags[t]  # If the episode ended, we don't bootstrap
+
+                td_error = (
+                    rewards[t]
+                    + GAMMA 
+                    * bootstrap_value
+                    * next_values[t]
+                    - old_values[t]
+                )
+
+                continuation_mask = 1.0 - episode_ended_flags[t]  # If the episode ended, we don't continue the GAE
+
+                gae = (
+                    td_error
+                    + GAMMA 
+                    * GAE_LAMBDA 
+                    * continuation_mask 
+                    * gae
+                )
+
+                advantages[t] = gae
+            
+            returns = advantages + old_values
 
         normalized_advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
 
@@ -107,7 +139,7 @@ def train() -> None:
 
         actor_loss = -(log_probs * normalized_advantages).mean()
 
-        critic_loss = 0.5 * (td_targets - predicted_values.squeeze(-1)).pow(2).mean()
+        critic_loss = 0.5 * (returns - predicted_values.squeeze(-1)).pow(2).mean()
 
         total_loss = (
             actor_loss
