@@ -1,0 +1,14 @@
+Environment: CartPole-v1
+Seed: 42
+Gamma: 0.99
+Learning rate: 0.01
+Value coefficient: 0.5
+Entropy coefficient: 0.001
+Position penalty coefficient: 0.1
+Max episodes: 1000
+Hidden dimension: 128
+Rollout steps: 256
+Max gradient norm: 0.5
+GAE lambda: 0.95
+Clip epsilon: 0.2
+PPO epochs: 4
