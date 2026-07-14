@@ -1,3 +1,5 @@
+import os
+
 import gymnasium as gym
 import torch
 import torch.nn as nn
@@ -34,13 +36,16 @@ PPO_EPOCHS = 4 # Number of epochs to update the model per rollout
 def train() -> None:
     torch.manual_seed(SEED)
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
     env = gym.make(ENV_NAME, render_mode="human")
     env.action_space.seed(SEED)
 
     observation_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
 
-    model = ActorCriticAgent(observation_dim, action_dim, HIDDEN_DIM)
+    model = ActorCriticAgent(observation_dim, action_dim, HIDDEN_DIM).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
@@ -59,7 +64,7 @@ def train() -> None:
         rollout_old_log_probs = []
 
         for step in range(ROLLOUT_STEPS):
-            state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
+            state_tensor = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)  # Add batch dimension
 
             with torch.no_grad():
                 action_logits, state_value = model(state_tensor)
@@ -99,13 +104,13 @@ def train() -> None:
             else:
                 state = next_state
         
-        states = torch.as_tensor(rollout_states, dtype=torch.float32)
-        actions = torch.as_tensor(rollout_actions, dtype=torch.int64)
-        rewards = torch.as_tensor(rollout_rewards, dtype=torch.float32)
-        next_states = torch.as_tensor(rollout_next_states, dtype=torch.float32)
-        terminated_flags = torch.as_tensor(rollout_terminated, dtype=torch.float32)
-        episode_ended_flags = torch.as_tensor(rollout_episode_ended, dtype=torch.float32)
-        old_log_probs = torch.as_tensor(rollout_old_log_probs, dtype=torch.float32)
+        states = torch.as_tensor(rollout_states, dtype=torch.float32, device=device)
+        actions = torch.as_tensor(rollout_actions, dtype=torch.int64, device=device)
+        rewards = torch.as_tensor(rollout_rewards, dtype=torch.float32, device=device)
+        next_states = torch.as_tensor(rollout_next_states, dtype=torch.float32, device=device)
+        terminated_flags = torch.as_tensor(rollout_terminated, dtype=torch.float32, device=device)
+        episode_ended_flags = torch.as_tensor(rollout_episode_ended, dtype=torch.float32, device=device)
+        old_log_probs = torch.as_tensor(rollout_old_log_probs, dtype=torch.float32, device=device)
 
         with torch.no_grad():
             _, old_values = model(states)
@@ -115,7 +120,7 @@ def train() -> None:
             next_values = next_values.squeeze(-1)
 
             advantages = torch.zeros_like(rewards)
-            gae = torch.tensor(0.0)
+            gae = torch.tensor(0.0, device=device)
 
             # Compute the Generalized Advantage Estimation (GAE) in reverse order 
             # Because we need to compute the advantage for each time step based on the future rewards and values
@@ -146,12 +151,6 @@ def train() -> None:
 
         normalized_advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
 
-        # logits, predicted_values = model(states)
-
-        # distribution = Categorical(logits=logits)
-        # log_probs = distribution.log_prob(actions)
-
-        # # actor_loss = -(log_probs * normalized_advantages).mean()
         for epoch in range(PPO_EPOCHS):
             logits, predicted_values = model(states)
             distribution = Categorical(logits=logits)
@@ -212,6 +211,29 @@ def train() -> None:
         )
 
     env.close()
+
+    # Save the trained model into model folder
+    os.makedirs("model", exist_ok=True)
+    torch.save(model.state_dict(), f"model/ppo_{ENV_NAME}_model.pth")
+
+    # Save the training configuration into a text file
+    with open(f"model/ppo_{ENV_NAME}_config.txt", "w") as f:
+        f.write(
+            f"Environment: {ENV_NAME}\n"
+            f"Seed: {SEED}\n"
+            f"Gamma: {GAMMA}\n"
+            f"Learning rate: {LEARNING_RATE}\n"
+            f"Value coefficient: {VALUE_COEF}\n"
+            f"Entropy coefficient: {ENTROPY_COEF}\n"
+            f"Position penalty coefficient: {POSITION_PENALTY_COEF}\n"
+            f"Max episodes: {MAX_EPISODES}\n"
+            f"Hidden dimension: {HIDDEN_DIM}\n"
+            f"Rollout steps: {ROLLOUT_STEPS}\n"
+            f"Max gradient norm: {MAX_GRAD_NORM}\n"
+            f"GAE lambda: {GAE_LAMBDA}\n"
+            f"Clip epsilon: {CLIP_EPSILON}\n"
+            f"PPO epochs: {PPO_EPOCHS}\n"
+        )
 
 if __name__ == "__main__":
     train()
