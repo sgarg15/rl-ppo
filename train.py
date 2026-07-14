@@ -16,6 +16,8 @@ LEARNING_RATE = 0.01 # Learning rate for the optimizer
 VALUE_COEF = 0.5 # Coefficient for the value loss
 ENTROPY_COEF = 0.001 # Coefficient for the entropy loss
 
+POSITION_PENALTY_COEF = 0.1 # Coefficient for penalizing distance of the cart from the center
+
 MAX_EPISODES = 1000 # Maximum number of episodes to train
 HIDDEN_DIM = 128 # Number of hidden units in the neural network
 
@@ -75,11 +77,14 @@ def train() -> None:
 
             current_episode_reward += reward
 
+            cart_position = next_state[0]
+            shaped_reward = reward - POSITION_PENALTY_COEF * abs(cart_position)
+
             done = terminated or truncated
 
             rollout_states.append(state)
             rollout_actions.append(action.item())
-            rollout_rewards.append(reward)
+            rollout_rewards.append(shaped_reward)
             rollout_next_states.append(next_state)
             rollout_terminated.append(terminated)
             rollout_episode_ended.append(done)
