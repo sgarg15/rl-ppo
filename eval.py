@@ -5,21 +5,22 @@ import torch
 from torch.distributions import Categorical
 
 from ac import ActorCriticAgent
-from train import ENV_NAME, HIDDEN_DIM
-
-MODEL_PATH = f"model/ppo_{ENV_NAME}_model.pth"
+from train import ENV_PRESETS
 
 
-def evaluate(episodes: int, render: bool, deterministic: bool) -> None:
+def evaluate(env_name: str, episodes: int, render: bool, deterministic: bool) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    env = gym.make(ENV_NAME, render_mode="human" if render else None)
+    hidden_dim = ENV_PRESETS[env_name]["hidden_dim"]
+    model_path = f"model/ppo_{env_name}_model.pth"
+
+    env = gym.make(env_name, render_mode="human" if render else None)
 
     observation_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
 
-    model = ActorCriticAgent(observation_dim, action_dim, HIDDEN_DIM).to(device)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model = ActorCriticAgent(observation_dim, action_dim, hidden_dim).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
     episode_rewards = []
@@ -55,6 +56,12 @@ def evaluate(episodes: int, render: bool, deterministic: bool) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate a trained PPO model")
+    parser.add_argument(
+        "--env",
+        choices=list(ENV_PRESETS),
+        default="CartPole-v1",
+        help="Gymnasium environment to evaluate on",
+    )
     parser.add_argument("--episodes", type=int, default=10, help="Number of episodes to run")
     parser.add_argument("--no-render", action="store_true", help="Disable rendering")
     parser.add_argument(
@@ -65,6 +72,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     evaluate(
+        env_name=args.env,
         episodes=args.episodes,
         render=not args.no_render,
         deterministic=not args.stochastic,

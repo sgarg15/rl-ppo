@@ -1,0 +1,14 @@
+Environment: LunarLander-v3
+Seed: 42
+Gamma: 0.99
+Learning rate: 0.0003
+Value coefficient: 0.5
+Entropy coefficient: 0.01
+Position penalty coefficient: 0.0
+Num updates: 500
+Hidden dimension: 128
+Rollout steps: 2048
+Max gradient norm: 0.5
+GAE lambda: 0.95
+Clip epsilon: 0.2
+PPO epochs: 4

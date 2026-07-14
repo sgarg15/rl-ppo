@@ -1,3 +1,4 @@
+import argparse
 import os
 
 import gymnasium as gym
@@ -9,21 +10,11 @@ from collections import deque
 
 from ac import ActorCriticAgent
 
-ENV_NAME = "CartPole-v1"
 SEED = 42
 
 GAMMA = 0.99 # Discount factor for future rewards
-LEARNING_RATE = 0.01 # Learning rate for the optimizer
 
 VALUE_COEF = 0.5 # Coefficient for the value loss
-ENTROPY_COEF = 0.001 # Coefficient for the entropy loss
-
-POSITION_PENALTY_COEF = 0.1 # Coefficient for penalizing distance of the cart from the center
-
-MAX_EPISODES = 1000 # Maximum number of episodes to train
-HIDDEN_DIM = 128 # Number of hidden units in the neural network
-
-ROLLOUT_STEPS = 256 # Number of steps to rollout before updating the model
 
 MAX_GRAD_NORM = 0.5 # Maximum gradient norm for gradient clipping
 
@@ -33,28 +24,62 @@ CLIP_EPSILON = 0.2 # Clipping parameter for PPO
 
 PPO_EPOCHS = 4 # Number of epochs to update the model per rollout
 
-def train() -> None:
+# Per-environment overrides, since a rollout/learning-rate/hidden-size tuned
+# for CartPole's short episodes doesn't transfer well to LunarLander.
+ENV_PRESETS = {
+    "CartPole-v1": {
+        "learning_rate": 0.01,
+        "rollout_steps": 256,
+        "num_updates": 1000,
+        "hidden_dim": 128,
+        "entropy_coef": 0.001,
+        "position_penalty_coef": 0.1, # Penalizes distance of the cart from the center
+        "reward_scale": 1.0,
+    },
+    "LunarLander-v3": {
+        "learning_rate": 3e-4,
+        "rollout_steps": 2048,
+        "num_updates": 500,
+        "hidden_dim": 128,
+        "entropy_coef": 0.01,
+        "position_penalty_coef": 0.0,
+        # LunarLander returns can be in the hundreds; without scaling, critic_loss
+        # dwarfs actor_loss and the shared gradient-norm clip crushes actor updates.
+        "reward_scale": 0.1,
+    },
+}
+
+def train(env_name: str, render: bool) -> None:
+    preset = ENV_PRESETS[env_name]
+    learning_rate = preset["learning_rate"]
+    rollout_steps = preset["rollout_steps"]
+    num_updates = preset["num_updates"]
+    hidden_dim = preset["hidden_dim"]
+    entropy_coef = preset["entropy_coef"]
+    position_penalty_coef = preset["position_penalty_coef"]
+    reward_scale = preset["reward_scale"]
+
     torch.manual_seed(SEED)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    env = gym.make(ENV_NAME, render_mode="human")
+    env = gym.make(env_name, render_mode="human" if render else None)
     env.action_space.seed(SEED)
 
     observation_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
 
-    model = ActorCriticAgent(observation_dim, action_dim, HIDDEN_DIM).to(device)
+    model = ActorCriticAgent(observation_dim, action_dim, hidden_dim).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     state, _ = env.reset(seed=SEED)
     current_episode_reward = 0.0
     reward_history = deque(maxlen=100)
     episode_completed = 0
 
-    for update in range(MAX_EPISODES):
+    for update in range(num_updates):
         rollout_states = []
         rollout_actions = []
         rollout_rewards = []
@@ -63,7 +88,7 @@ def train() -> None:
         rollout_episode_ended = []
         rollout_old_log_probs = []
 
-        for step in range(ROLLOUT_STEPS):
+        for step in range(rollout_steps):
             state_tensor = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)  # Add batch dimension
 
             with torch.no_grad():
@@ -82,8 +107,12 @@ def train() -> None:
 
             current_episode_reward += reward
 
-            cart_position = next_state[0]
-            shaped_reward = reward - POSITION_PENALTY_COEF * abs(cart_position)
+            if position_penalty_coef > 0:
+                shaped_reward = reward - position_penalty_coef * abs(next_state[0])
+            else:
+                shaped_reward = reward
+
+            shaped_reward *= reward_scale
 
             done = terminated or truncated
 
@@ -124,7 +153,7 @@ def train() -> None:
 
             # Compute the Generalized Advantage Estimation (GAE) in reverse order 
             # Because we need to compute the advantage for each time step based on the future rewards and values
-            for t in reversed(range(ROLLOUT_STEPS)):
+            for t in reversed(range(rollout_steps)):
                 bootstrap_value = 1.0 - terminated_flags[t]  # If the episode ended, we don't bootstrap
 
                 td_error = (
@@ -176,7 +205,7 @@ def train() -> None:
             total_loss = (
                 actor_loss_clipped
                 + VALUE_COEF * critic_loss
-                - ENTROPY_COEF * distribution.entropy().mean()
+                - entropy_coef * distribution.entropy().mean()
             )
 
             optimizer.zero_grad()
@@ -214,21 +243,22 @@ def train() -> None:
 
     # Save the trained model into model folder
     os.makedirs("model", exist_ok=True)
-    torch.save(model.state_dict(), f"model/ppo_{ENV_NAME}_model.pth")
+    torch.save(model.state_dict(), f"model/ppo_{env_name}_model.pth")
 
     # Save the training configuration into a text file
-    with open(f"model/ppo_{ENV_NAME}_config.txt", "w") as f:
+    with open(f"model/ppo_{env_name}_config.txt", "w") as f:
         f.write(
-            f"Environment: {ENV_NAME}\n"
+            f"Environment: {env_name}\n"
             f"Seed: {SEED}\n"
             f"Gamma: {GAMMA}\n"
-            f"Learning rate: {LEARNING_RATE}\n"
+            f"Learning rate: {learning_rate}\n"
             f"Value coefficient: {VALUE_COEF}\n"
-            f"Entropy coefficient: {ENTROPY_COEF}\n"
-            f"Position penalty coefficient: {POSITION_PENALTY_COEF}\n"
-            f"Max episodes: {MAX_EPISODES}\n"
-            f"Hidden dimension: {HIDDEN_DIM}\n"
-            f"Rollout steps: {ROLLOUT_STEPS}\n"
+            f"Entropy coefficient: {entropy_coef}\n"
+            f"Position penalty coefficient: {position_penalty_coef}\n"
+            f"Reward scale: {reward_scale}\n"
+            f"Num updates: {num_updates}\n"
+            f"Hidden dimension: {hidden_dim}\n"
+            f"Rollout steps: {rollout_steps}\n"
             f"Max gradient norm: {MAX_GRAD_NORM}\n"
             f"GAE lambda: {GAE_LAMBDA}\n"
             f"Clip epsilon: {CLIP_EPSILON}\n"
@@ -236,5 +266,15 @@ def train() -> None:
         )
 
 if __name__ == "__main__":
-    train()
-    
+    parser = argparse.ArgumentParser(description="Train a PPO agent")
+    parser.add_argument(
+        "--env",
+        choices=list(ENV_PRESETS),
+        default="CartPole-v1",
+        help="Gymnasium environment to train on",
+    )
+    parser.add_argument("--render", action="store_true", help="Render the environment while training")
+    args = parser.parse_args()
+
+    train(env_name=args.env, render=args.render)
+
