@@ -2,12 +2,12 @@ import argparse
 import os
 
 import gymnasium as gym
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.distributions import Categorical
 from collections import deque
 
-from ac import ActorCriticAgent
+from ac import create_model, to_env_action, to_stored_action
 from plotting import plot_training_curves
 
 SEED = 42
@@ -50,6 +50,17 @@ ENV_PRESETS = {
         "reward_scale": 0.1,
         "value_coef": 0.5,
     },
+    # Continuous-action environment (Box action space), exercising ContinuousActorCritic.
+    "BipedalWalker-v3": {
+        "learning_rate": 3e-4,
+        "rollout_steps": 2048,
+        "num_updates": 3000,
+        "hidden_dim": 256,
+        "entropy_coef": 0.0,
+        "position_penalty_coef": 0.0,
+        "reward_scale": 1.0,
+        "value_coef": 0.5,
+    },
 }
 
 def train(env_name: str, render: bool) -> None:
@@ -72,9 +83,8 @@ def train(env_name: str, render: bool) -> None:
     env.action_space.seed(SEED)
 
     observation_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.n
 
-    model = ActorCriticAgent(observation_dim, action_dim, hidden_dim).to(device)
+    model = create_model(env, observation_dim, hidden_dim).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -106,18 +116,11 @@ def train(env_name: str, render: bool) -> None:
             state_tensor = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)  # Add batch dimension
 
             with torch.no_grad():
-                action_logits, state_value = model(state_tensor)
+                env_action, policy_action, old_log_prob, _ = model.act(state_tensor)
 
-                # Create a categorical distribution over the action logits
-                distribution = Categorical(logits=action_logits)
-
-                # Sample an action from the distribution and compute its log probability and compute the entropy of the distribution
-                action = distribution.sample()
-                
-                # Compute the log probability of the selected action
-                old_log_prob = distribution.log_prob(action)
-
-            next_state, reward, terminated, truncated, _ = env.step(action.item())
+            next_state, reward, terminated, truncated, _ = env.step(
+                to_env_action(env_action, env.action_space)
+            )
 
             current_episode_reward += reward
 
@@ -131,7 +134,7 @@ def train(env_name: str, render: bool) -> None:
             done = terminated or truncated
 
             rollout_states.append(state)
-            rollout_actions.append(action.item())
+            rollout_actions.append(to_stored_action(policy_action, env.action_space))
             rollout_rewards.append(shaped_reward)
             rollout_next_states.append(next_state)
             rollout_terminated.append(terminated)
@@ -147,21 +150,19 @@ def train(env_name: str, render: bool) -> None:
                 state, _ = env.reset()
             else:
                 state = next_state
-        
-        states = torch.as_tensor(rollout_states, dtype=torch.float32, device=device)
-        actions = torch.as_tensor(rollout_actions, dtype=torch.int64, device=device)
+
+        states = torch.as_tensor(np.array(rollout_states), dtype=torch.float32, device=device)
+        action_dtype = torch.int64 if isinstance(env.action_space, gym.spaces.Discrete) else torch.float32
+        actions = torch.as_tensor(np.array(rollout_actions), dtype=action_dtype, device=device)
         rewards = torch.as_tensor(rollout_rewards, dtype=torch.float32, device=device)
-        next_states = torch.as_tensor(rollout_next_states, dtype=torch.float32, device=device)
+        next_states = torch.as_tensor(np.array(rollout_next_states), dtype=torch.float32, device=device)
         terminated_flags = torch.as_tensor(rollout_terminated, dtype=torch.float32, device=device)
         episode_ended_flags = torch.as_tensor(rollout_episode_ended, dtype=torch.float32, device=device)
         old_log_probs = torch.as_tensor(rollout_old_log_probs, dtype=torch.float32, device=device)
 
         with torch.no_grad():
-            _, old_values = model(states)
-            _, next_values = model(next_states)
-
-            old_values = old_values.squeeze(-1)
-            next_values = next_values.squeeze(-1)
+            old_values = model.get_value(states)
+            next_values = model.get_value(next_states)
 
             advantages = torch.zeros_like(rewards)
             gae = torch.tensor(0.0, device=device)
@@ -196,18 +197,16 @@ def train(env_name: str, render: bool) -> None:
         normalized_advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
 
         for epoch in range(PPO_EPOCHS):
-            logits, predicted_values = model(states)
-            distribution = Categorical(logits=logits)
+            new_log_probs, entropy_per_sample, predicted_values = model.evaluate_actions(states, actions)
 
-            new_log_probs = distribution.log_prob(actions)
             log_ratio = new_log_probs - old_log_probs
             ratio = torch.exp(log_ratio)
 
             unclipped_objective = ratio * normalized_advantages
 
             clipped_ratio = torch.clamp(
-                ratio, 
-                1.0 - CLIP_EPSILON, 
+                ratio,
+                1.0 - CLIP_EPSILON,
                 1.0 + CLIP_EPSILON
             )
 
@@ -215,9 +214,9 @@ def train(env_name: str, render: bool) -> None:
 
             actor_loss_clipped = -torch.min(unclipped_objective, clipped_objective).mean()
 
-            critic_loss = 0.5 * (returns - predicted_values.squeeze(-1)).pow(2).mean()
+            critic_loss = 0.5 * (returns - predicted_values).pow(2).mean()
 
-            entropy = distribution.entropy().mean()
+            entropy = entropy_per_sample.mean()
 
             total_loss = (
                 actor_loss_clipped
@@ -303,4 +302,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     train(env_name=args.env, render=args.render)
+
 

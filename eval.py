@@ -2,9 +2,8 @@ import argparse
 
 import gymnasium as gym
 import torch
-from torch.distributions import Categorical
 
-from ac import ActorCriticAgent
+from ac import create_model, to_env_action
 from train import ENV_PRESETS
 
 
@@ -17,9 +16,8 @@ def evaluate(env_name: str, episodes: int, render: bool, deterministic: bool) ->
     env = gym.make(env_name, render_mode="human" if render else None)
 
     observation_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.n
 
-    model = ActorCriticAgent(observation_dim, action_dim, hidden_dim).to(device)
+    model = create_model(env, observation_dim, hidden_dim).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
@@ -34,14 +32,11 @@ def evaluate(env_name: str, episodes: int, render: bool, deterministic: bool) ->
             state_tensor = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
 
             with torch.no_grad():
-                action_logits, _ = model(state_tensor)
+                env_action, _, _, _ = model.act(state_tensor, deterministic=deterministic)
 
-                if deterministic:
-                    action = action_logits.argmax(dim=-1)
-                else:
-                    action = Categorical(logits=action_logits).sample()
-
-            state, reward, terminated, truncated, _ = env.step(action.item())
+            state, reward, terminated, truncated, _ = env.step(
+                to_env_action(env_action, env.action_space)
+            )
             episode_reward += reward
             done = terminated or truncated
 
@@ -67,7 +62,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--stochastic",
         action="store_true",
-        help="Sample actions from the policy instead of taking the argmax",
+        help="Sample actions from the policy instead of taking the argmax/mean",
     )
     args = parser.parse_args()
 
