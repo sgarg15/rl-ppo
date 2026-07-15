@@ -5,16 +5,14 @@ import gymnasium as gym
 import torch
 import torch.nn as nn
 from torch.distributions import Categorical
-import numpy as np
 from collections import deque
 
 from ac import ActorCriticAgent
+from plotting import plot_training_curves
 
 SEED = 42
 
 GAMMA = 0.99 # Discount factor for future rewards
-
-VALUE_COEF = 0.5 # Coefficient for the value loss
 
 MAX_GRAD_NORM = 0.5 # Maximum gradient norm for gradient clipping
 
@@ -35,17 +33,22 @@ ENV_PRESETS = {
         "entropy_coef": 0.001,
         "position_penalty_coef": 0.1, # Penalizes distance of the cart from the center
         "reward_scale": 1.0,
+        "value_coef": 0.5,
     },
     "LunarLander-v3": {
+        # 1e-4/0.25 was tried to stabilize late-stage training but caused the
+        # policy to freeze at ~40 avg reward (ratio stuck at 1.0, no further
+        # updates); 3e-4/0.5 reached 190 avg at 2000 updates, so keep it.
         "learning_rate": 3e-4,
         "rollout_steps": 2048,
-        "num_updates": 500,
+        "num_updates": 3000, # Reward was still climbing at 2000 updates (reached ~190 avg)
         "hidden_dim": 128,
         "entropy_coef": 0.01,
         "position_penalty_coef": 0.0,
         # LunarLander returns can be in the hundreds; without scaling, critic_loss
         # dwarfs actor_loss and the shared gradient-norm clip crushes actor updates.
         "reward_scale": 0.1,
+        "value_coef": 0.5,
     },
 }
 
@@ -58,6 +61,7 @@ def train(env_name: str, render: bool) -> None:
     entropy_coef = preset["entropy_coef"]
     position_penalty_coef = preset["position_penalty_coef"]
     reward_scale = preset["reward_scale"]
+    value_coef = preset["value_coef"]
 
     torch.manual_seed(SEED)
 
@@ -78,6 +82,16 @@ def train(env_name: str, render: bool) -> None:
     current_episode_reward = 0.0
     reward_history = deque(maxlen=100)
     episode_completed = 0
+
+    episode_rewards = []
+    update_history = {
+        "average_reward": [],
+        "actor_loss": [],
+        "critic_loss": [],
+        "entropy": [],
+        "clip_fraction": [],
+        "ratio_mean": [],
+    }
 
     for update in range(num_updates):
         rollout_states = []
@@ -126,6 +140,7 @@ def train(env_name: str, render: bool) -> None:
 
             if done:
                 reward_history.append(current_episode_reward)
+                episode_rewards.append(current_episode_reward)
                 episode_completed += 1
 
                 current_episode_reward = 0.0
@@ -202,10 +217,12 @@ def train(env_name: str, render: bool) -> None:
 
             critic_loss = 0.5 * (returns - predicted_values.squeeze(-1)).pow(2).mean()
 
+            entropy = distribution.entropy().mean()
+
             total_loss = (
                 actor_loss_clipped
-                + VALUE_COEF * critic_loss
-                - entropy_coef * distribution.entropy().mean()
+                + value_coef * critic_loss
+                - entropy_coef * entropy
             )
 
             optimizer.zero_grad()
@@ -231,6 +248,13 @@ def train(env_name: str, render: bool) -> None:
             sum(reward_history) / len(reward_history) if reward_history else 0.0
         )
 
+        update_history["average_reward"].append(average_reward)
+        update_history["actor_loss"].append(actor_loss_clipped.item())
+        update_history["critic_loss"].append(critic_loss.item())
+        update_history["entropy"].append(entropy.item())
+        update_history["clip_fraction"].append(clip_fraction.item())
+        update_history["ratio_mean"].append(ratio.mean().item())
+
         print(
             f"Update {update:4d} | "
             f"Episodes {episode_completed:4d} | "
@@ -240,6 +264,8 @@ def train(env_name: str, render: bool) -> None:
         )
 
     env.close()
+
+    plot_training_curves(env_name, episode_rewards, update_history)
 
     # Save the trained model into model folder
     os.makedirs("model", exist_ok=True)
@@ -252,7 +278,7 @@ def train(env_name: str, render: bool) -> None:
             f"Seed: {SEED}\n"
             f"Gamma: {GAMMA}\n"
             f"Learning rate: {learning_rate}\n"
-            f"Value coefficient: {VALUE_COEF}\n"
+            f"Value coefficient: {value_coef}\n"
             f"Entropy coefficient: {entropy_coef}\n"
             f"Position penalty coefficient: {position_penalty_coef}\n"
             f"Reward scale: {reward_scale}\n"

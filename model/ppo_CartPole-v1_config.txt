@@ -5,9 +5,10 @@ Learning rate: 0.01
 Value coefficient: 0.5
 Entropy coefficient: 0.001
 Position penalty coefficient: 0.1
-Num updates: 2
+Reward scale: 1.0
+Num updates: 1000
 Hidden dimension: 128
-Rollout steps: 32
+Rollout steps: 256
 Max gradient norm: 0.5
 GAE lambda: 0.95
 Clip epsilon: 0.2
